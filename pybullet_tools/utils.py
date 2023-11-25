@@ -847,13 +847,26 @@ def get_urdf_flags(cache=False, cylinder=False, merge=False, sat=False):
     #flags |= p.URDF_USE_INERTIA_FROM_FILE
     return flags
 
-def load_pybullet(filename, fixed_base=False, scale=1., **kwargs):
+def load_pybullet(filename, fixed_base=False, scale=1., base_position=None, base_orientation=None, **kwargs):
     # fixed_base=False implies infinite base mass
     with LockRenderer():
         flags = get_urdf_flags(**kwargs)
+
+        load_kwargs = {
+            "useFixedBase": fixed_base,
+            "flags": flags,
+            "globalScaling": scale,
+            "physicsClientId": CLIENT
+        }
+        
+        # Add base_position and base_orientation to kwargs if provided
+        if base_position is not None:
+            load_kwargs["basePosition"] = base_position
+        if base_orientation is not None:
+            load_kwargs["baseOrientation"] = base_orientation
+
         if filename.endswith('.urdf'):
-            body = p.loadURDF(filename, useFixedBase=fixed_base, flags=flags,
-                              globalScaling=scale, physicsClientId=CLIENT)
+            body = p.loadURDF(filename, **load_kwargs)
         elif filename.endswith('.sdf'):
             body = p.loadSDF(filename, physicsClientId=CLIENT)
         elif filename.endswith('.xml'):
@@ -861,12 +874,33 @@ def load_pybullet(filename, fixed_base=False, scale=1., **kwargs):
         elif filename.endswith('.bullet'):
             body = p.loadBullet(filename, physicsClientId=CLIENT)
         elif filename.endswith('.obj'):
-            # TODO: fixed_base => mass = 0?
             body = create_obj(filename, scale=scale, **kwargs)
         else:
             raise ValueError(filename)
+
     INFO_FROM_BODY[CLIENT, body] = ModelInfo(None, filename, fixed_base, scale)
     return body
+
+# def load_pybullet(filename, fixed_base=False, scale=1., **kwargs):
+#     # fixed_base=False implies infinite base mass
+#     with LockRenderer():
+#         flags = get_urdf_flags(**kwargs)
+#         if filename.endswith('.urdf'):
+#             body = p.loadURDF(filename, useFixedBase=fixed_base, flags=flags,
+#                               globalScaling=scale, physicsClientId=CLIENT)
+#         elif filename.endswith('.sdf'):
+#             body = p.loadSDF(filename, physicsClientId=CLIENT)
+#         elif filename.endswith('.xml'):
+#             body = p.loadMJCF(filename, physicsClientId=CLIENT, flags=flags)
+#         elif filename.endswith('.bullet'):
+#             body = p.loadBullet(filename, physicsClientId=CLIENT)
+#         elif filename.endswith('.obj'):
+#             # TODO: fixed_base => mass = 0?
+#             body = create_obj(filename, scale=scale, **kwargs)
+#         else:
+#             raise ValueError(filename)
+#     INFO_FROM_BODY[CLIENT, body] = ModelInfo(None, filename, fixed_base, scale)
+#     return body
 
 def set_caching(cache=False):
     # enableFileCaching: Set to 0 to disable file caching, such as .obj wavefront file loading
