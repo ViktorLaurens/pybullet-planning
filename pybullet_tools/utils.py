@@ -1807,7 +1807,7 @@ def interval_difference(value2, value1, interval=UNIT_LIMITS):
 def interval_distance(value1, value2, **kwargs):
     return abs(interval_difference(value2, value1, **kwargs))
 
-def circular_interval(lower=-PI): # [-np.pi, np.pi)
+def circular_interval(lower=-PI): # [-np.pi, np.pi]
     return Interval(lower, lower + 2*PI)
 
 def wrap_angle(theta, **kwargs):
@@ -3752,6 +3752,18 @@ def get_sample_fn(body, joints, custom_limits={}, **kwargs):
         return tuple(next(generator))
     return fn
 
+def get_composite_sample_fn(robots, custom_limits={}, **kwargs):
+    generators = []
+    for robot in robots:
+        lower_limits, upper_limits = get_custom_limits(robot.body, robot.ik_joints, custom_limits, circular_limits=CIRCULAR_LIMITS)
+        generator = interval_generator(lower_limits, upper_limits, **kwargs)
+        generators.append(generator)
+
+    def fn():
+        return tuple(next(gen) for gen in generators)
+
+    return fn
+
 def get_halton_sample_fn(body, joints, **kwargs):
     return get_sample_fn(body, joints, use_halton=True, **kwargs)
 
@@ -3762,6 +3774,18 @@ def get_difference_fn(body, joints):
         return tuple(circular_difference(value2, value1) if circular else (value2 - value1)
                      for circular, value2, value1 in zip(circular_joints, q2, q1))
     return fn
+
+def get_composite_difference_fn(robots):
+    # Create a list of circular joint flags for all robots
+    all_circular_joints = [is_circular(robot.body, joint) for robot in robots for joint in robot.ik_joints]
+
+    def fn(q2, q1):
+        assert len(q2) == len(q1) == len(all_circular_joints), "Configuration lengths must match"
+        # Compute the difference for each joint
+        return tuple(circular_difference(value2, value1) if circular else (value2 - value1)
+                     for circular, value2, value1 in zip(all_circular_joints, q2, q1))
+    return fn
+
 
 def get_default_weights(body, joints, weights=None):
     if weights is not None:
@@ -3778,6 +3802,28 @@ def get_distance_fn(body, joints, weights=None, norm=2):
         if norm == 2:
             return np.sqrt(np.dot(weights, diff * diff))
         return np.linalg.norm(np.multiply(weights, diff), ord=norm)
+    return fn
+
+def get_composite_distance_fn(robots, weights=None, norm=2):
+    # Concatenate weights for all robots
+    all_weights = []
+    for robot in robots:
+        robot_weights = get_default_weights(robot.body, robot.ik_joints, weights)
+        all_weights.extend(robot_weights)
+
+    difference_fn = get_composite_difference_fn(robots)
+
+    def fn(q1, q2):
+
+        assert len(q1) == len(q2) == len(all_weights), "Configuration and weight lengths must match"
+        diff = np.array(difference_fn(q2, q1))
+
+        if norm == 2:
+            return np.sqrt(np.dot(all_weights, diff * diff))
+        else:
+            weighted_diff = np.multiply(all_weights, diff)
+            return np.linalg.norm(weighted_diff, ord=norm)
+
     return fn
 
 def get_duration_fn(body, joints, velocities=None, norm=INF):
@@ -3834,6 +3880,19 @@ def get_extend_fn(body, joints, resolutions=None, norm=2):
         #steps = int(np.max(np.abs(np.divide(difference_fn(q2, q1), resolutions))))
         steps = int(np.linalg.norm(np.divide(difference_fn(q2, q1), resolutions), ord=norm))
         refine_fn = get_refine_fn(body, joints, num_steps=steps)
+        return refine_fn(q1, q2)
+    return fn
+
+def get_composite_extend_fn(robots, resolutions=None, norm=2):
+    # norm = 1, 2, INF
+    resolutions = []
+    for robot in robots:
+        resolutions.append(get_default_resolutions(robot.body, robot.ik_joints, resolutions))
+    difference_fn = get_composite_difference_fn(robots)
+    def fn(q1, q2):
+        #steps = int(np.max(np.abs(np.divide(difference_fn(q2, q1), resolutions))))
+        steps = int(np.linalg.norm(np.divide(difference_fn(q2, q1), resolutions), ord=norm))
+        refine_fn = get_refine_fn(robot.body, robot.ik_joints, num_steps=steps)
         return refine_fn(q1, q2)
     return fn
 
@@ -3982,6 +4041,142 @@ def get_collision_fn(body, joints, obstacles=[], attachments=[], self_collisions
         return False
     return collision_fn
 
+# def get_composite_collision_fn(robots, obstacles=[], attachments=[], self_collisions=True, disabled_collisions=set(),
+#                      custom_limits={}, use_aabb=False, cache=False, max_distance=MAX_DISTANCE, **kwargs):
+#     # TODO: convert most of these to keyword arguments
+#     check_link_pairs = get_self_link_pairs(body, joints, disabled_collisions) if self_collisions else []
+#     moving_links = frozenset(link for link in get_moving_links(body, joints)
+#                              if can_collide(body, link)) # TODO: propagate elsewhere
+#     # attached_bodies = [attachment.child for attachment in attachments]
+#     # moving_bodies = [CollisionPair(body, moving_links)] + list(map(parse_body, attached_bodies))
+#     get_obstacle_aabb = cached_fn(get_buffered_aabb, cache=cache, max_distance=max_distance/2., **kwargs)
+#     limits_fn = get_limits_fn(body, joints, custom_limits=custom_limits)
+#     # TODO: sort bodies by bounding box size
+#     # TODO: cluster together links that remain rigidly attached to reduce the number of checks
+
+#     def collision_fn(q, verbose=False):
+#         if limits_fn(q):
+#             return True
+#         set_joint_positions(robot.body, robot.ik_joints, q)
+#         for attachment in attachments:
+#             attachment.assign()
+#         get_moving_aabb = cached_fn(get_buffered_aabb, cache=True, max_distance=max_distance/2., **kwargs)
+
+#         for link1, link2 in check_link_pairs:
+#             # Self-collisions should not have the max_distance parameter
+#             # TODO: self-collisions between body and attached_bodies (except for the link adjacent to the robot)
+#             if (not use_aabb or aabb_overlap(get_moving_aabb(body), get_moving_aabb(body))) and \
+#                     pairwise_link_collision(body, link1, body, link2): #, **kwargs):
+#                 #print(get_body_name(body), get_link_name(body, link1), get_link_name(body, link2))
+#                 if verbose: print(body, link1, body, link2)
+#                 return True
+            
+#         for body1, body2 in product(moving_bodies, obstacles):
+#             if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+#                     and pairwise_collision(body1, body2, **kwargs):
+#                 #print(get_body_name(body1), get_body_name(body2))
+#                 if verbose: print(body1, body2)
+#                 return True
+#         return False
+#     return collision_fn
+
+def get_composite_collision_fn(robots, obstacles=[], attachments=[], self_collisions=True, disabled_collisions=set(),
+                               custom_limits={}, use_aabb=False, cache=False, max_distance=MAX_DISTANCE, **kwargs):
+    
+    check_link_pairs = []
+    # attached_bodies = []
+    moving_bodies = []
+    limits_fn = []
+    for robot in robots: 
+        # attached_bodies.append([attachment.child for attachment in attachments])
+        # moving_bodies.append([CollisionPair(robot.body, moving_links)] + list(map(parse_body, attached_bodies)))
+        robot_check_link_pairs = get_self_link_pairs(robot.body, robot.ik_joints, disabled_collisions) if self_collisions else []
+        robot_moving_links = frozenset(link for link in get_moving_links(robot.body, robot.ik_joints)
+                                       if can_collide(robot.body, link))
+        robot_limits_fn = get_limits_fn(robot.body, robot.ik_joints, custom_limits=custom_limits)
+
+        check_link_pairs.append(robot_check_link_pairs)
+        moving_bodies.append(CollisionPair(robot.body, robot_moving_links))
+        limits_fn.append(robot_limits_fn)
+    
+    get_obstacle_aabb = cached_fn(get_buffered_aabb, cache=cache, max_distance=max_distance/2., **kwargs)
+    robot_collision_pairs = [(robot1, robot2) for robot1 in robots for robot2 in robots if robot1 != robot2]
+    # attached_bodies = [attachment.child for attachment in attachments]
+    # obstacle_bodies = list(map(parse_body, obstacles + attached_bodies))
+
+    def collision_fn(qs, verbose=False):
+        for q, robot, robot_check_link_pairs, robot_moving_body, robot_limits_fn in zip(qs, robots, check_link_pairs, moving_bodies, limits_fn):
+            assert len(q) == len(robot.ik_joints), "Configuration length must match number of joints in robot"
+            if robot_limits_fn(q):
+                return True
+            set_joint_positions(robot.body, robot.ik_joints, q)
+            get_moving_aabb = cached_fn(get_buffered_aabb, cache=True, max_distance=max_distance/2., **kwargs)
+
+            if self_collisions:
+                for link1, link2 in robot_check_link_pairs:
+                    if (not use_aabb or aabb_overlap(get_moving_aabb(robot.body), get_moving_aabb(robot.body))) and \
+                        pairwise_link_collision(robot.body, link1, robot.body, link2):
+                        if verbose: print(robot.body, link1, robot.body, link2)
+                        return True
+
+            for obstacle in obstacles:
+                if (not use_aabb or aabb_overlap(get_moving_aabb(robot_moving_body), get_obstacle_aabb(obstacle))) and \
+                    pairwise_collision(robot_moving_body, obstacle):
+                    if verbose: print(robot.body, obstacle)
+                    return True
+
+        for robot1, robot2 in robot_collision_pairs:
+            if (not use_aabb or aabb_overlap(get_moving_aabb(robot1.body), get_moving_aabb(robot2.body))) and \
+                    pairwise_collision(robot1.body, robot2.body):
+                if verbose: print(robot1.body, robot2.body)
+                return True
+
+        return False
+
+    return collision_fn
+
+    # def collision_fn(qs, verbose=False):
+    #     # Check each robot's configuration against limits
+    #     for q, robot in zip(qs, robots):
+    #         assert len(q) == len(robot.ik_joints), "Configuration length must match number of robots"
+    #         # limits_fn = get_limits_fn(robot.body, robot.ik_joints, custom_limits=custom_limits)
+    #         if limits_fn(q):
+    #             return True
+    #         set_joint_positions(robot.body, robot.ik_joints, q)
+    #         # for attachment in attachments:
+    #         #     attachment.assign()
+    #         get_moving_aabb = cached_fn(get_buffered_aabb, cache=True, max_distance=max_distance/2., **kwargs)
+
+    #         # Check self-collisions,
+    #         if self_collisions:
+    #             # check_link_pairs = get_self_link_pairs(robot.body, robot.ik_joints, disabled_collisions)
+    #             for link1, link2 in check_link_pairs:
+    #                 if (not use_aabb or aabb_overlap(get_moving_aabb(robot.body), get_moving_aabb(robot.body))) and \
+    #                 pairwise_link_collision(robot.body, link1, robot.body, link2): #, **kwargs):
+    #                 #print(get_body_name(body), get_link_name(body, link1), get_link_name(body, link2))
+    #                     if verbose: print(robot.body, link1, robot.body, link2)
+    #                     return True
+
+    #         # check for collisions with obstacles        
+    #         for body1, body2 in product(moving_bodies, obstacles):
+    #             if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+    #                 and pairwise_collision(body1, body2, **kwargs):
+    #                 #print(get_body_name(body1), get_body_name(body2))
+    #                 if verbose: print(body1, body2)
+    #         return True
+        
+    #     # Check collisions between robots
+    #     for robot1, robot2 in robot_collision_pairs:
+    #         if (not use_aabb or aabb_overlap(get_moving_aabb(robot1.body), get_moving_aabb(robot2.body))) \
+    #                 and pairwise_collision(robot1.body, robot2.body, **kwargs):
+    #             if verbose: print(robot1.body, robot2.body)
+    #             return True
+
+    #     return False
+
+    # return collision_fn
+
+
 def interpolate_joint_waypoints(body, joints, waypoints, resolutions=None,
                                 collision_fn=lambda *args, **kwargs: False, **kwargs):
     # TODO: unify with refine_path
@@ -4025,6 +4220,16 @@ def check_initial_end(start_conf, end_conf, collision_fn, verbose=True):
         return False
     return True
 
+def check_multi_initial_end(start_confs, end_confs, collision_fn, verbose=True):
+    # TODO: collision_fn might not accept kwargs
+    if collision_fn(start_confs, verbose=verbose):
+        print('Warning: initial configuration is in collision')
+        return False
+    if collision_fn(end_confs, verbose=verbose):
+        print('Warning: end configuration is in collision')
+        return False
+    return True
+
 def plan_joint_motion(body, joints, end_conf, obstacles=[], attachments=[],
                       self_collisions=True, disabled_collisions=set(),
                       weights=None, resolutions=None, max_distance=MAX_DISTANCE,
@@ -4039,11 +4244,10 @@ def plan_joint_motion(body, joints, end_conf, obstacles=[], attachments=[],
     collision_fn = get_collision_fn(body, joints, obstacles, attachments, self_collisions, disabled_collisions,
                                     custom_limits=custom_limits, max_distance=max_distance,
                                     use_aabb=use_aabb, cache=cache)
-
-    start_conf = get_joint_positions(body, joints)
+    
+    start_conf = get_joint_positions(body, joints) 
     if not check_initial_end(start_conf, end_conf, collision_fn):
         return None
-
     if algorithm is None:
         from motion_planners.rrt_connect import birrt
         return birrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
@@ -4077,6 +4281,54 @@ def plan_lazy_prm(start_conf, end_conf, sample_fn, extend_fn, collision_fn, **kw
         handles.append(add_line(draw_fn(samples[i1]), draw_fn(samples[i2]), color=color))
     wait_if_gui()
     return path
+
+
+def plan_multi_robot_motion(robots, end_confs, obstacles=[], attachments=[],
+                        self_collisions=True, disabled_collisions=set(),
+                        weights=None, resolutions=None, max_distance=MAX_DISTANCE,
+                        use_aabb=False, cache=True, custom_limits={}, algorithm=None, **kwargs):
+    """
+    Plan motion for multiple robots.
+    :param robots: List of robot bodies.
+    :param end_confs: List of end configurations for each robot.
+    :param obstacles: Shared environmental obstacles.
+    :param attachments: Attachments for each robot.
+    :param ...: Other parameters.
+    :return: Paths for each robot or None if unable to find a solution.
+    """
+    assert len(robots) == len(end_confs) # Number of robots must match number of end configurations
+    start_confs = []
+    for robot, end_conf in zip(robots, end_confs):
+        len(robot.ik_joints) == len(end_conf) # Mismatch in number of IK joints and end configuration length for a robot?
+        if (robot.weights is None) and (resolutions is not None):
+            robot.weights = np.reciprocal(resolutions)
+        # robot.distance_fn = get_distance_fn(robot.body, robot.ik_joints, weights=weights)
+        # robot.extend_fn = get_extend_fn(robot.body, robot.ik_joints, resolutions=resolutions)
+        start_conf = get_joint_positions(robot.body, robot.ik_joints)
+        start_confs.append(start_conf)
+    
+    composite_distance_fn = get_composite_distance_fn(robots, weights=weights)
+    composite_sample_fn = get_composite_sample_fn(robots, custom_limits=custom_limits)
+    composite_extend_fn = get_composite_extend_fn(robots, resolutions=resolutions)
+    composite_collision_fn = get_composite_collision_fn(robots, obstacles, attachments, self_collisions, disabled_collisions,
+                                                        custom_limits, max_distance, use_aabb, cache) # This function should check for collisions between robots and between each robot and the environment
+    
+    # check that starting and end configurations are feasible
+    if not check_multi_initial_end(start_confs, end_confs, composite_collision_fn):
+        return None
+
+    # If algorithm is not specified, use bi-directional RRT by default
+    if algorithm is None:
+        # from motion_planners.rrt_connect import birrt
+        from motion_planners.rrt_connect import rrt_connect_multi_robots
+        paths = rrt_connect_multi_robots(start_confs, end_confs, composite_distance_fn, composite_extend_fn, composite_sample_fn, composite_collision_fn, **kwargs)
+    else:
+        paths = solve(start_confs, end_confs, composite_distance_fn, composite_sample_fn, composite_extend_fn, composite_collision_fn,
+                    algorithm=algorithm, weights=weights, **kwargs)
+    if paths is None:
+        return None
+    return paths
+
 
 #####################################
 
@@ -5113,8 +5365,8 @@ def multiple_sub_inverse_kinematics(robot, first_joint, target_link, target_pose
             kinematic_conf = get_configuration(robot) # TODO: test on the resulting robot state (e.g. collisions)
             #if not all_between(lower_limits, kinematic_conf, upper_limits):
             solutions.append(kinematic_conf) # kinematic_conf | sub_kinematic_conf
-    if solutions:
-        set_configuration(robot, solutions[-1])
+    # if solutions:
+    #     set_configuration(robot, solutions[-1])
     # TODO: test for redundant configurations
     remove_body(sub_robot)
     return solutions

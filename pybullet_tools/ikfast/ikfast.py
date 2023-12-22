@@ -133,7 +133,7 @@ def ikfast_forward_kinematics(robot, ikfast_info, tool_link, conf=None, use_ikfa
 ##################################################
 
 def ikfast_inverse_kinematics(robot, ikfast_info, tool_link, world_from_target,
-                              fixed_joints=[], max_attempts=INF, max_time=INF,
+                              fixed_joints=[], max_attempts=100, max_time=1,
                               norm=INF, max_distance=INF, **kwargs):
     assert (max_attempts < INF) or (max_time < INF)
     if max_distance is None:
@@ -201,8 +201,11 @@ def pybullet_inverse_kinematics(robot, ikfast_info, tool_link, world_from_target
     solutions = multiple_sub_inverse_kinematics(robot, first_joint, tool_link, world_from_target,
                                                 max_attempts=1, first_close=True, **kwargs)
     for solution in solutions: # TODO: sort by distance
-        set_configuration(robot, solution)
-        yield get_joint_positions(robot, ik_joints)
+        # set_configuration(robot, solution)
+        # yield get_joint_positions(robot, ik_joints)
+        # Extract only the positions of the ik_joints
+        formatted_solution = [solution[joint] for joint in ik_joints]
+        yield formatted_solution
 
 
 def either_inverse_kinematics(robot, ikfast_info, tool_link, world_from_target, fixed_joints=[],
